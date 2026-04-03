@@ -39,6 +39,10 @@ on:
   push:
     branches: [main, master, develop]
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   supply-chain-audit:
     name: Supply Chain Audit
@@ -67,8 +71,24 @@ jobs:
           fi
 
       # --- Setup pnpm (only if detected) ---
-      - name: Setup pnpm
+      # If package.json has `packageManager` field, pnpm/action-setup reads it automatically.
+      # We only set `version` when no packageManager is defined, to avoid conflicts.
+      - name: Check for packageManager field
         if: steps.detect-pm.outputs.pm == 'pnpm'
+        id: check-pm-field
+        run: |
+          if grep -q '"packageManager"' package.json 2>/dev/null; then
+            echo "has_pm_field=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pm_field=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup pnpm (version from packageManager)
+        if: steps.detect-pm.outputs.pm == 'pnpm' && steps.check-pm-field.outputs.has_pm_field == 'true'
+        uses: pnpm/action-setup@v4
+
+      - name: Setup pnpm (fallback version)
+        if: steps.detect-pm.outputs.pm == 'pnpm' && steps.check-pm-field.outputs.has_pm_field != 'true'
         uses: pnpm/action-setup@v4
         with:
           version: ${{ inputs.pnpm-version || '10' }}
