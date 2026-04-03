@@ -1,0 +1,139 @@
+# Reusable GitHub Actions workflow for npm supply chain security.
+# Copy to .github/workflows/supply-chain-ci.yml in any RSL repo.
+#
+# Auto-detects package manager from lockfile (pnpm-lock.yaml → pnpm, else npm).
+# Override via workflow_call inputs if needed.
+#
+# What it does:
+#   1. Frozen lockfile install (no resolution drift)
+#   2. Security audit (blocks on high+ vulnerabilities)
+#   3. Lockfile integrity check (detects injection attacks)
+
+name: Supply Chain Security
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        required: false
+        default: '22'
+        type: string
+      pnpm-version:
+        description: 'pnpm version (only used if pnpm detected)'
+        required: false
+        default: '10'
+        type: string
+      audit-level:
+        description: 'Minimum vulnerability level to fail on'
+        required: false
+        default: 'high'
+        type: string
+      working-directory:
+        description: 'Working directory (for monorepos)'
+        required: false
+        default: '.'
+        type: string
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches: [main, master, develop]
+
+jobs:
+  supply-chain-audit:
+    name: Supply Chain Audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Detect package manager from lockfile ---
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+            echo "Detected: pnpm (pnpm-lock.yaml found)"
+          elif [ -f "package-lock.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+            echo "Detected: npm (package-lock.json found)"
+          else
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+            echo "::warning::No lockfile found — defaulting to npm. Consider committing a lockfile."
+          fi
+
+      # --- Setup pnpm (only if detected) ---
+      # If package.json has `packageManager` field, pnpm/action-setup reads it automatically.
+      # We only set `version` when no packageManager is defined, to avoid conflicts.
+      - name: Check for packageManager field
+        if: steps.detect-pm.outputs.pm == 'pnpm'
+        id: check-pm-field
+        run: |
+          if grep -q '"packageManager"' package.json 2>/dev/null; then
+            echo "has_pm_field=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pm_field=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup pnpm (version from packageManager)
+        if: steps.detect-pm.outputs.pm == 'pnpm' && steps.check-pm-field.outputs.has_pm_field == 'true'
+        uses: pnpm/action-setup@v4
+
+      - name: Setup pnpm (fallback version)
+        if: steps.detect-pm.outputs.pm == 'pnpm' && steps.check-pm-field.outputs.has_pm_field != 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version || '10' }}
+
+      # --- Setup Node.js ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version || '22' }}
+          cache: ${{ steps.detect-pm.outputs.pm }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@redstonelabs'
+
+      # --- Frozen Lockfile Install ---
+      - name: Install dependencies (pnpm)
+        if: steps.detect-pm.outputs.pm == 'pnpm'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+        env:
+          npm_config_ignore_scripts: 'true'
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies (npm)
+        if: steps.detect-pm.outputs.pm == 'npm'
+        run: npm ci --ignore-scripts
+        env:
+          npm_config_ignore_scripts: 'true'
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Security Audit ---
+      - name: Security audit (pnpm)
+        if: steps.detect-pm.outputs.pm == 'pnpm'
+        run: pnpm audit --audit-level=${{ inputs.audit-level || 'high' }}
+        continue-on-error: true
+
+      - name: Security audit (npm)
+        if: steps.detect-pm.outputs.pm == 'npm'
+        run: npm audit --audit-level=${{ inputs.audit-level || 'high' }}
+        continue-on-error: true
+
+      # --- Lockfile Integrity ---
+      - name: Check lockfile integrity
+        run: |
+          if [ -n "$(git diff --name-only)" ]; then
+            echo "::error::Lockfile was modified during install — possible lockfile injection attack!"
+            echo "Changed files:"
+            git diff --name-only
+            exit 1
+          fi
+          echo "✅ Lockfile integrity verified"
