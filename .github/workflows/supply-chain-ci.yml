@@ -39,14 +39,13 @@ on:
   push:
     branches: [main, master, develop]
 
-permissions:
-  contents: read
-  packages: read
-
 jobs:
   supply-chain-audit:
     name: Supply Chain Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     defaults:
       run:
         working-directory: ${{ inputs.working-directory || '.' }}
@@ -100,6 +99,7 @@ jobs:
           node-version: ${{ inputs.node-version || '22' }}
           cache: ${{ steps.detect-pm.outputs.pm }}
           registry-url: 'https://npm.pkg.github.com'
+          scope: '@redstonelabs'
 
       # --- Frozen Lockfile Install ---
       - name: Install dependencies (pnpm)
