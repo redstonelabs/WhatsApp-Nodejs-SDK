@@ -1,0 +1,122 @@
+# Reusable GitHub Actions workflow for npm supply chain security.
+# Copy to .github/workflows/supply-chain-ci.yml in any RSL repo,
+# or use as a reusable workflow via `uses:`.
+#
+# What it does:
+#   1. Frozen lockfile install (no resolution drift)
+#   2. Security audit (blocks on high+ vulnerabilities)
+#   3. Lockfile integrity check (detects injection attacks)
+#
+# Usage (standalone):
+#   Copy this file to .github/workflows/supply-chain-ci.yml
+#
+# Usage (reusable — from org .github repo):
+#   jobs:
+#     security:
+#       uses: redstonelabs/.github/.github/workflows/supply-chain-ci.yml@main
+#       with:
+#         node-version: '22'
+#         package-manager: 'pnpm'
+
+name: Supply Chain Security
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        required: false
+        default: '22'
+        type: string
+      package-manager:
+        description: 'Package manager: npm or pnpm'
+        required: false
+        default: 'npm'
+        type: string
+      pnpm-version:
+        description: 'pnpm version (ignored if package-manager is npm)'
+        required: false
+        default: '10'
+        type: string
+      audit-level:
+        description: 'Minimum vulnerability level to fail on'
+        required: false
+        default: 'high'
+        type: string
+      working-directory:
+        description: 'Working directory (for monorepos)'
+        required: false
+        default: '.'
+        type: string
+  # Also allow standalone trigger
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches: [main, master, develop]
+
+jobs:
+  supply-chain-audit:
+    name: Supply Chain Audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        if: inputs.package-manager == 'pnpm' || !inputs.package-manager
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version || '10' }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version || '22' }}
+          cache: ${{ inputs.package-manager || 'pnpm' }}
+
+      # --- Frozen Lockfile Install ---
+      # Prevents resolution drift — only installs exact versions from lockfile.
+      # If lockfile is out of sync with package.json, this fails (intentional).
+
+      - name: Install dependencies (pnpm — frozen lockfile)
+        if: inputs.package-manager == 'pnpm' || !inputs.package-manager
+        run: pnpm install --frozen-lockfile --ignore-scripts
+        env:
+          # Ensure scripts are blocked even if project .npmrc allows them
+          npm_config_ignore_scripts: 'true'
+
+      - name: Install dependencies (npm — frozen lockfile)
+        if: inputs.package-manager == 'npm'
+        run: npm ci --ignore-scripts
+        env:
+          npm_config_ignore_scripts: 'true'
+
+      # --- Security Audit ---
+      # Checks all dependencies against the npm advisory database.
+      # Fails if any vulnerability at or above audit-level is found.
+
+      - name: Security audit (pnpm)
+        if: inputs.package-manager == 'pnpm' || !inputs.package-manager
+        run: pnpm audit --audit-level=${{ inputs.audit-level || 'high' }}
+
+      - name: Security audit (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm audit --audit-level=${{ inputs.audit-level || 'high' }}
+
+      # --- Lockfile Integrity ---
+      # Detects lockfile injection: if `pnpm install` or `npm install`
+      # would modify the lockfile, someone tampered with it.
+
+      - name: Check lockfile integrity
+        run: |
+          if [ -n "$(git diff --name-only)" ]; then
+            echo "::error::Lockfile was modified during install — possible lockfile injection attack!"
+            echo "Changed files:"
+            git diff --name-only
+            exit 1
+          fi
+          echo "✅ Lockfile integrity verified"
